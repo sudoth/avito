@@ -1,3 +1,4 @@
+import argparse
 import random
 from pathlib import Path
 
@@ -17,18 +18,47 @@ from avito_orientation.synthetic import (
     get_cyrillic_fonts,
 )
 
-
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-TRAIN_BATCH_SIZE = 256
-VAL_BATCH_SIZE = 256
+TRAIN_BATCH_SIZE = 128
+VAL_BATCH_SIZE = 128
 NUM_WORKERS = 8
 EPOCHS = 8
 LR = 1e-4
 WEIGHT_DECAY = 1e-4
+MODEL_NAME = "convnext_tiny"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODEL_DIR = PROJECT_ROOT / "models"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--model",
+    choices=[
+        "efficientnet_v2_s",
+        "convnext_tiny",
+        "convnextv2_tiny",
+        "mobilenetv4",
+    ],
+        default="efficientnet_v2_s",
+    )
+
+    parser.add_argument(
+        "--protocol",
+        choices=["e1", "e2"],
+        default="e1",
+    )
+
+    parser.add_argument(
+        "--max-width",
+        type=int,
+        default=768,
+    )
+
+    return parser.parse_args()
 
 
 @torch.no_grad()
@@ -44,23 +74,12 @@ def evaluate(model, loader):
         images = images.to(DEVICE, non_blocking=True)
         labels = labels.to(DEVICE, non_blocking=True)
 
-        with torch.autocast(
-            device_type="cuda",
-            dtype=torch.float16,
-        ):
-            logits1 = model(images).squeeze(1)
-            probs1 = torch.sigmoid(logits1)
-
-            rotated = torch.rot90(
-                images,
-                k=2,
-                dims=(-2, -1),
-            )
-
-            logits2 = model(rotated).squeeze(1)
-            probs2 = torch.sigmoid(logits2)
-
-            probs = (probs1 + (1.0 - probs2)) / 2.0
+        # with torch.autocast(
+        #     device_type="cuda",
+        #     dtype=torch.bfloat16,
+        # ):
+        logits = model(images).squeeze(1)
+        probs = torch.sigmoid(logits)
 
         confidence = torch.maximum(probs, 1 - probs)
         confidence_sum += confidence.sum().item()
@@ -81,6 +100,12 @@ def evaluate(model, loader):
 
 
 def main():
+    args = parse_args()
+
+    MODEL_NAME = args.model
+    PROTOCOL = args.protocol
+    MAX_WIDTH = args.max_width
+
     torch.set_float32_matmul_precision("high")
     MODEL_DIR.mkdir(exist_ok=True)
 
@@ -96,52 +121,42 @@ def main():
         split="train",
     )
 
-    all_fonts = get_cyrillic_fonts()
+    if PROTOCOL == "e1":
+        train_source = train_hf
 
-    rng = random.Random(42)
-    rng.shuffle(all_fonts)
+    elif PROTOCOL == "e2":
+        all_fonts = get_cyrillic_fonts()
 
-    split = int(len(all_fonts) * 0.8)
+        rng = random.Random(42)
+        rng.shuffle(all_fonts)
 
-    train_fonts = all_fonts[:split]
-    val_fonts = all_fonts[split:]
+        split = int(len(all_fonts) * 0.8)
+        train_fonts = all_fonts[:split]
+        val_fonts = all_fonts[split:]
 
-    print(
-        f"Cyrillic fonts: "
-        f"{len(train_fonts)} train / "
-        f"{len(val_fonts)} val"
-    )
+        synthetic_train = SyntheticCyrillicDataset(
+            size=100_000,
+            fonts=train_fonts,
+            seed=42,
+        )
 
-    synthetic_train = SyntheticCyrillicDataset(
-        size=100_000,
-        fonts=train_fonts,
-        seed=42,
-    )
-
-    mixed_train = MixedDataset(
-        real_dataset=train_hf,
-        synthetic_dataset=synthetic_train,
-        synthetic_fraction=0.25,
-    )
+        train_source = MixedDataset(
+            real_dataset=train_hf,
+            synthetic_dataset=synthetic_train,
+            synthetic_fraction=0.25,
+        )
 
     train_dataset = OrientationDataset(
-        mixed_train,
+        train_source,
+        height=64,
+        max_width=MAX_WIDTH,
         train=True,
     )
 
     val_dataset = OrientationDataset(
         val_hf,
-        train=False,
-    )
-
-    synthetic_val_raw = SyntheticCyrillicDataset(
-        size=5_000,
-        fonts=val_fonts,
-        seed=1_000_000,
-    )
-
-    cyrillic_val_dataset = OrientationDataset(
-        synthetic_val_raw,
+        height=64,
+        max_width=MAX_WIDTH,
         train=False,
     )
 
@@ -163,17 +178,7 @@ def main():
         persistent_workers=True,
     )
 
-    cyrillic_val_loader = DataLoader(
-        cyrillic_val_dataset,
-        batch_size=VAL_BATCH_SIZE,
-        shuffle=False,
-        num_workers=NUM_WORKERS,
-        pin_memory=True,
-        persistent_workers=True,
-    )
-
-    model = create_model().to(DEVICE)
-
+    model = create_model(MODEL_NAME).to(DEVICE)
     criterion = nn.BCEWithLogitsLoss()
 
     optimizer = AdamW(
@@ -183,10 +188,10 @@ def main():
     )
 
     scheduler = CosineAnnealingLR(
-    optimizer,
-    T_max=EPOCHS,
-    eta_min=1e-6,
-)
+        optimizer,
+        T_max=EPOCHS,
+        eta_min=1e-6,
+    )
 
     best_brier = float("inf")
 
@@ -207,12 +212,12 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
 
-            with torch.autocast(
-                device_type="cuda",
-                dtype=torch.float16,
-            ):
-                logits = model(images).squeeze(1)
-                loss = criterion(logits, labels)
+            # with torch.autocast(
+            #     device_type="cuda",
+            #     dtype=torch.bfloat16,
+            # ):
+            logits = model(images).squeeze(1)
+            loss = criterion(logits, labels)
 
             loss.backward()
             optimizer.step()
@@ -222,18 +227,11 @@ def main():
             running_loss += loss.item() * batch_size
             n += batch_size
 
-            progress.set_postfix(
-                loss=f"{running_loss / n:.4f}"
-            )
+            progress.set_postfix(loss=f"{running_loss / n:.4f}")
 
-        icdar_metrics = evaluate(
+        metrics = evaluate(
             model,
             val_loader,
-        )
-
-        cyr_metrics = evaluate(
-            model,
-            cyrillic_val_loader,
         )
 
         scheduler.step()
@@ -243,27 +241,25 @@ def main():
         print(
             f"\nEpoch {epoch}: "
             f"train_loss={running_loss / n:.5f} | "
-            f"ICDAR score={icdar_metrics['score']:.6f} "
-            f"accuracy={icdar_metrics['accuracy']:.2%} | "
-            f"CYR score={cyr_metrics['score']:.6f} "
-            f"accuracy={cyr_metrics['accuracy']:.2%} | "
+            f"score={metrics['score']:.6f} "
+            f"accuracy={metrics['accuracy']:.2%} | "
             f"lr={current_lr:.2e}"
         )
 
-        if icdar_metrics["brier"] < best_brier:
-            best_brier = icdar_metrics["brier"]
+        if metrics["brier"] < best_brier:
+            best_brier = metrics["brier"]
 
             torch.save(
                 {
                     "model": model.state_dict(),
                     "epoch": epoch,
-                    "icdar_metrics": icdar_metrics,
-                    "cyrillic_metrics": cyr_metrics,
+                    "metrics": metrics,
+                    "model_name": MODEL_NAME,
+                    "protocol": PROTOCOL,
+                    "max_width": MAX_WIDTH,
                 },
-                MODEL_DIR / "efficientnet_v2_s_e2.pt",
+                MODEL_DIR / f"{MODEL_NAME}_{PROTOCOL}_w{MAX_WIDTH}.pt",
             )
-
-            print("Saved new best E2 checkpoint")
 
 
 if __name__ == "__main__":

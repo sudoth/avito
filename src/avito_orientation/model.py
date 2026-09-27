@@ -1,20 +1,49 @@
 import torch.nn as nn
+import timm
+
 from torchvision.models import (
+    ConvNeXt_Tiny_Weights,
     EfficientNet_V2_S_Weights,
+    convnext_tiny,
     efficientnet_v2_s,
 )
 
 
-def create_model():
-    weights = EfficientNet_V2_S_Weights.DEFAULT
+def create_model(name="efficientnet_v2_s"):
+    if name == "efficientnet_v2_s":
+        model = efficientnet_v2_s(
+            weights=EfficientNet_V2_S_Weights.DEFAULT,
+        )
 
-    model = efficientnet_v2_s(weights=weights)
+        in_features = model.classifier[1].in_features
+        model.classifier[1] = nn.Linear(in_features, 1)
 
-    in_features = model.classifier[1].in_features
+        return model
 
-    model.classifier[1] = nn.Linear(
-        in_features,
-        1,
-    )
+    if name == "convnext_tiny":
+        model = convnext_tiny(
+            weights=ConvNeXt_Tiny_Weights.DEFAULT,
+        )
 
-    return model
+        in_features = model.classifier[2].in_features
+        model.classifier[2] = nn.Linear(in_features, 1)
+
+        return model
+
+    if name == "convnextv2_tiny":
+        model = timm.create_model(
+            "convnextv2_tiny.fcmae_ft_in22k_in1k",
+            pretrained=True,
+            num_classes=1,
+        )
+
+        return model
+
+    elif name == "mobilenetv4":
+        model = timm.create_model(
+            "mobilenetv4_conv_medium.e500_r256_in1k",
+            pretrained=True,
+            num_classes=1,
+        )
+
+        return model

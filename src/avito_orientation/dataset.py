@@ -27,24 +27,6 @@ class OrientationDataset(Dataset):
         if self.train:
             self.augment = A.Compose([
                 # геометрические искажения
-                # A.Affine(
-                #     scale=(0.9, 1.1),
-                #     translate_percent=(-0.03, 0.03),
-                #     rotate=(-7, 7),
-                #     shear=(-3, 3),
-                #     border_mode=cv2.BORDER_CONSTANT,
-                #     fill=255,
-                #     p=0.35,
-                # ),
-
-                # A.Perspective(
-                #     scale=(0.02, 0.06),
-                #     border_mode=cv2.BORDER_CONSTANT,
-                #     fill=255,
-                #     p=0.15,
-                # ),
-
-
                 A.Affine(
                     scale=(0.9, 1.1),
                     translate_percent=(-0.04, 0.04),

@@ -1,3 +1,4 @@
+import random
 from pathlib import Path
 
 import torch
@@ -10,6 +11,11 @@ from tqdm.auto import tqdm
 
 from avito_orientation.dataset import OrientationDataset
 from avito_orientation.model import create_model
+from avito_orientation.synthetic import (
+    MixedDataset,
+    SyntheticCyrillicDataset,
+    get_cyrillic_fonts,
+)
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -90,13 +96,52 @@ def main():
         split="train",
     )
 
+    all_fonts = get_cyrillic_fonts()
+
+    rng = random.Random(42)
+    rng.shuffle(all_fonts)
+
+    split = int(len(all_fonts) * 0.8)
+
+    train_fonts = all_fonts[:split]
+    val_fonts = all_fonts[split:]
+
+    print(
+        f"Cyrillic fonts: "
+        f"{len(train_fonts)} train / "
+        f"{len(val_fonts)} val"
+    )
+
+    synthetic_train = SyntheticCyrillicDataset(
+        size=100_000,
+        fonts=train_fonts,
+        seed=42,
+    )
+
+    mixed_train = MixedDataset(
+        real_dataset=train_hf,
+        synthetic_dataset=synthetic_train,
+        synthetic_fraction=0.25,
+    )
+
     train_dataset = OrientationDataset(
-        train_hf,
+        mixed_train,
         train=True,
     )
 
     val_dataset = OrientationDataset(
         val_hf,
+        train=False,
+    )
+
+    synthetic_val_raw = SyntheticCyrillicDataset(
+        size=5_000,
+        fonts=val_fonts,
+        seed=1_000_000,
+    )
+
+    cyrillic_val_dataset = OrientationDataset(
+        synthetic_val_raw,
         train=False,
     )
 
@@ -111,6 +156,15 @@ def main():
 
     val_loader = DataLoader(
         val_dataset,
+        batch_size=VAL_BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=True,
+        persistent_workers=True,
+    )
+
+    cyrillic_val_loader = DataLoader(
+        cyrillic_val_dataset,
         batch_size=VAL_BATCH_SIZE,
         shuffle=False,
         num_workers=NUM_WORKERS,
@@ -172,7 +226,15 @@ def main():
                 loss=f"{running_loss / n:.4f}"
             )
 
-        metrics = evaluate(model, val_loader)
+        icdar_metrics = evaluate(
+            model,
+            val_loader,
+        )
+
+        cyr_metrics = evaluate(
+            model,
+            cyrillic_val_loader,
+        )
 
         scheduler.step()
 
@@ -181,26 +243,27 @@ def main():
         print(
             f"\nEpoch {epoch}: "
             f"train_loss={running_loss / n:.5f} | "
-            f"val_brier={metrics['brier']:.6f} | "
-            f"score={metrics['score']:.6f} | "
-            f"accuracy={metrics['accuracy']:.4%} | "
-            f"confidence={metrics['mean_confidence']:.4f} | "
+            f"ICDAR score={icdar_metrics['score']:.6f} "
+            f"accuracy={icdar_metrics['accuracy']:.2%} | "
+            f"CYR score={cyr_metrics['score']:.6f} "
+            f"accuracy={cyr_metrics['accuracy']:.2%} | "
             f"lr={current_lr:.2e}"
         )
 
-        if metrics["brier"] < best_brier:
-            best_brier = metrics["brier"]
+        if icdar_metrics["brier"] < best_brier:
+            best_brier = icdar_metrics["brier"]
 
             torch.save(
                 {
                     "model": model.state_dict(),
                     "epoch": epoch,
-                    "metrics": metrics,
+                    "icdar_metrics": icdar_metrics,
+                    "cyrillic_metrics": cyr_metrics,
                 },
-                MODEL_DIR / "efficientnet_v2_s_e1.pt",
+                MODEL_DIR / "efficientnet_v2_s_e2.pt",
             )
 
-            print("Saved new best checkpoint")
+            print("Saved new best E2 checkpoint")
 
 
 if __name__ == "__main__":

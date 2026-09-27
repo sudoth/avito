@@ -222,3 +222,5 @@ __marimo__/
 data/external/*
 data/synthetic/*
 data/test/*
+
+data/*.csv

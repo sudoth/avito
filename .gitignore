@@ -224,3 +224,5 @@ data/synthetic/*
 data/test/*
 
 data/*.csv
+
+models/*

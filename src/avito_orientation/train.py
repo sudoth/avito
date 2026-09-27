@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from datasets import load_dataset
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -16,8 +17,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TRAIN_BATCH_SIZE = 256
 VAL_BATCH_SIZE = 256
 NUM_WORKERS = 8
-EPOCHS = 5
-LR = 3e-4
+EPOCHS = 8
+LR = 1e-4
 WEIGHT_DECAY = 1e-4
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -28,6 +29,7 @@ MODEL_DIR = PROJECT_ROOT / "models"
 def evaluate(model, loader):
     model.eval()
 
+    confidence_sum = 0.0
     sum_squared_error = 0.0
     correct = 0
     n = 0
@@ -36,20 +38,39 @@ def evaluate(model, loader):
         images = images.to(DEVICE, non_blocking=True)
         labels = labels.to(DEVICE, non_blocking=True)
 
-        logits = model(images).squeeze(1)
-        probs = torch.sigmoid(logits)
+        with torch.autocast(
+            device_type="cuda",
+            dtype=torch.float16,
+        ):
+            logits1 = model(images).squeeze(1)
+            probs1 = torch.sigmoid(logits1)
 
+            rotated = torch.rot90(
+                images,
+                k=2,
+                dims=(-2, -1),
+            )
+
+            logits2 = model(rotated).squeeze(1)
+            probs2 = torch.sigmoid(logits2)
+
+            probs = (probs1 + (1.0 - probs2)) / 2.0
+
+        confidence = torch.maximum(probs, 1 - probs)
+        confidence_sum += confidence.sum().item()
         sum_squared_error += ((probs - labels) ** 2).sum().item()
         correct += ((probs >= 0.5) == labels.bool()).sum().item()
         n += labels.numel()
 
     brier = sum_squared_error / n
     accuracy = correct / n
+    mean_confidence = confidence_sum / n
 
     return {
         "brier": brier,
         "score": 1.0 - brier,
         "accuracy": accuracy,
+        "mean_confidence": mean_confidence,
     }
 
 
@@ -107,6 +128,12 @@ def main():
         weight_decay=WEIGHT_DECAY,
     )
 
+    scheduler = CosineAnnealingLR(
+    optimizer,
+    T_max=EPOCHS,
+    eta_min=1e-6,
+)
+
     best_brier = float("inf")
 
     for epoch in range(1, EPOCHS + 1):
@@ -147,12 +174,18 @@ def main():
 
         metrics = evaluate(model, val_loader)
 
+        scheduler.step()
+
+        current_lr = optimizer.param_groups[0]["lr"]
+
         print(
             f"\nEpoch {epoch}: "
             f"train_loss={running_loss / n:.5f} | "
             f"val_brier={metrics['brier']:.6f} | "
             f"score={metrics['score']:.6f} | "
-            f"accuracy={metrics['accuracy']:.4%}"
+            f"accuracy={metrics['accuracy']:.4%} | "
+            f"confidence={metrics['mean_confidence']:.4f} | "
+            f"lr={current_lr:.2e}"
         )
 
         if metrics["brier"] < best_brier:
@@ -164,7 +197,7 @@ def main():
                     "epoch": epoch,
                     "metrics": metrics,
                 },
-                MODEL_DIR / "efficientnet_v2_s_e0.pt",
+                MODEL_DIR / "efficientnet_v2_s_e1.pt",
             )
 
             print("Saved new best checkpoint")

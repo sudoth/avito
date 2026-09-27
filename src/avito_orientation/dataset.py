@@ -6,6 +6,9 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import functional as TF
 
+import albumentations as A
+import cv2
+
 
 class OrientationDataset(Dataset):
     def __init__(
@@ -19,6 +22,74 @@ class OrientationDataset(Dataset):
         self.height = height
         self.max_width = max_width
         self.train = train
+        self.augment = None
+
+        if self.train:
+            self.augment = A.Compose([
+                # геометрические искажения
+                # A.Affine(
+                #     scale=(0.9, 1.1),
+                #     translate_percent=(-0.03, 0.03),
+                #     rotate=(-7, 7),
+                #     shear=(-3, 3),
+                #     border_mode=cv2.BORDER_CONSTANT,
+                #     fill=255,
+                #     p=0.35,
+                # ),
+
+                # A.Perspective(
+                #     scale=(0.02, 0.06),
+                #     border_mode=cv2.BORDER_CONSTANT,
+                #     fill=255,
+                #     p=0.15,
+                # ),
+
+
+                A.Affine(
+                    scale=(0.9, 1.1),
+                    translate_percent=(-0.04, 0.04),
+                    rotate=(-10, 10),
+                    shear=(-5, 5),
+                    border_mode=cv2.BORDER_CONSTANT,
+                    fill=255,
+                    p=0.6,
+                ),
+
+                A.Perspective(
+                    scale=(0.02, 0.06),
+                    border_mode=cv2.BORDER_CONSTANT,
+                    fill=255,
+                    p=0.25,
+                ),
+
+                # проблемы качества
+                A.OneOf([
+                    A.GaussianBlur(blur_limit=(3, 5)),
+                    A.MotionBlur(blur_limit=(3, 5)),
+                ], p=0.25),
+
+                A.OneOf([
+                    A.GaussNoise(std_range=(0.01, 0.05)),
+                    A.ISONoise(),
+                ], p=0.20),
+
+                A.RandomBrightnessContrast(
+                    brightness_limit=0.20,
+                    contrast_limit=0.20,
+                    p=0.30,
+                ),
+
+                A.ImageCompression(
+                    quality_range=(35, 95),
+                    p=0.25,
+                ),
+
+                # даунскелим
+                A.Downscale(
+                    scale_range=(0.35, 0.8),
+                    p=0.25,
+                ),
+            ])
 
     def __len__(self):
         if self.train:
@@ -78,6 +149,11 @@ class OrientationDataset(Dataset):
 
     def __getitem__(self, idx):
         image, label = self.get_image_and_label(idx)
+
+        if self.augment is not None:
+            image_np = np.array(image)
+            image_np = self.augment(image=image_np)["image"]
+            image = Image.fromarray(image_np)
 
         image = self.resize_and_pad(image)
 

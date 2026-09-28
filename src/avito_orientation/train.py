@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from datasets import load_dataset
+import numpy as np
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -58,6 +59,8 @@ def parse_args():
         default=768,
     )
 
+    parser.add_argument("--seed", type=int, default=42)
+
     return parser.parse_args()
 
 
@@ -101,6 +104,11 @@ def evaluate(model, loader):
 
 def main():
     args = parse_args()
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
 
     MODEL_NAME = args.model
     PROTOCOL = args.protocol
@@ -257,8 +265,9 @@ def main():
                     "model_name": MODEL_NAME,
                     "protocol": PROTOCOL,
                     "max_width": MAX_WIDTH,
+                    "seed": args.seed,
                 },
-                MODEL_DIR / f"{MODEL_NAME}_{PROTOCOL}_w{MAX_WIDTH}.pt",
+                MODEL_DIR / f"{MODEL_NAME}_{PROTOCOL}_w{MAX_WIDTH}_seed{args.seed}.pt.pt",
             )
 
 

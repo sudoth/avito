@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("checkpoint")
+    parser.add_argument("--checkpoint")
 
     parser.add_argument(
         "--model",
@@ -26,7 +26,11 @@ def parse_args():
             "efficientnet_v2_s",
             "convnext_tiny",
             "convnextv2_tiny",
+            "convnextv2_base",
             "mobilenetv4",
+            "caformer_s18",
+            "convnext_dinov3_base",
+            "convnext_dinov3_small",
         ],
     )
 
@@ -65,17 +69,20 @@ def evaluate(model, loader):
     labels = torch.cat(all_labels)
 
 
-    # 0 - ориг, 1 - перевернутый
+    # В выборке подряд идут две версии одного изображения:
+    # исходная с классом 0 и повёрнутая на 180° с классом 1.
     p0 = probs[0::2]
     p180 = probs[1::2]
 
     y0 = labels[0::2]
 
-    # оба выражаем через p
+    # Вероятность для повёрнутой версии переводим обратно
+    # к вероятности класса исходного изображения и усредняем.
     p_tta = (p0 + (1.0 - p180)) / 2.0
 
     normal_brier = ((p0 - y0) ** 2).mean().item()
     tta_brier = ((p_tta - y0) ** 2).mean().item()
+    both_brier = ((probs - labels) ** 2).mean().item()
 
     normal_acc = (
         (p0 >= 0.5) == y0.bool()
@@ -85,11 +92,14 @@ def evaluate(model, loader):
         (p_tta >= 0.5) == y0.bool()
     ).float().mean().item()
 
+    # Насколько сильно нарушается ожидаемая симметрия
+    # p(x) = 1 - p(R180(x)).
     consistency = (
         p0 - (1.0 - p180)
     ).abs().mean().item()
 
     return {
+        "both_brier": both_brier,
         "normal_brier": normal_brier,
         "normal_acc": normal_acc,
         "tta_brier": tta_brier,

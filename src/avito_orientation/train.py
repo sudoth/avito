@@ -43,6 +43,10 @@ def parse_args():
         "convnext_tiny",
         "convnextv2_tiny",
         "mobilenetv4",
+        "convnextv2_base",
+        "caformer_s18",
+        "convnext_dinov3_base",
+        "convnext_dinov3_small",
     ],
         default="efficientnet_v2_s",
     )
@@ -59,7 +63,37 @@ def parse_args():
         default=768,
     )
 
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=8,
+    )
+
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=1e-4,
+    )
+
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=128,
+    )
+
     parser.add_argument("--seed", type=int, default=42)
+
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+    )
+
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+    )
 
     return parser.parse_args()
 
@@ -113,6 +147,10 @@ def main():
     MODEL_NAME = args.model
     PROTOCOL = args.protocol
     MAX_WIDTH = args.max_width
+    LR = args.lr
+    TRAIN_BATCH_SIZE = args.batch_size
+    VAL_BATCH_SIZE = args.batch_size
+    EPOCHS = args.epochs
 
     torch.set_float32_matmul_precision("high")
     MODEL_DIR.mkdir(exist_ok=True)
@@ -189,6 +227,22 @@ def main():
     model = create_model(MODEL_NAME).to(DEVICE)
     criterion = nn.BCEWithLogitsLoss()
 
+    if args.resume is not None:
+        checkpoint = torch.load(
+            args.resume,
+            map_location="cpu",
+            weights_only=True,
+        )
+
+        model.load_state_dict(
+            checkpoint["model"]
+        )
+
+        print(
+            f"Loaded weights from {args.resume} "
+            f"(epoch={checkpoint['epoch']})"
+        )
+
     optimizer = AdamW(
         model.parameters(),
         lr=LR,
@@ -202,6 +256,15 @@ def main():
     )
 
     best_brier = float("inf")
+
+    if args.run_name is not None:
+        checkpoint_name = args.run_name
+    else:
+        checkpoint_name = (
+            f"{MODEL_NAME}_{PROTOCOL}_w{MAX_WIDTH}_seed{args.seed}"
+        )
+
+    checkpoint_path = MODEL_DIR / f"{checkpoint_name}.pt"
 
     for epoch in range(1, EPOCHS + 1):
         model.train()
@@ -267,7 +330,7 @@ def main():
                     "max_width": MAX_WIDTH,
                     "seed": args.seed,
                 },
-                MODEL_DIR / f"{MODEL_NAME}_{PROTOCOL}_w{MAX_WIDTH}_seed{args.seed}.pt.pt",
+                checkpoint_path,
             )
 
 

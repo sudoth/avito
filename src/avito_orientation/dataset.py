@@ -66,7 +66,7 @@ class OrientationDataset(Dataset):
                     p=0.25,
                 ),
 
-                # даунскелим
+                # уменьшение качества через понижение разрешения
                 A.Downscale(
                     scale_range=(0.35, 0.8),
                     p=0.25,
@@ -77,13 +77,17 @@ class OrientationDataset(Dataset):
         if self.train:
             return len(self.dataset)
 
-        # в валидационном датасете присутствует и прямое и перевернутое изображение
+        # Для проверки используем обе ориентации каждого изображения.
+        # Так выборка получается детерминированной и сбалансированной.
         return 2 * len(self.dataset)
 
     def get_image_and_label(self, idx):
         if self.train:
             image = self.dataset[idx]["image"].convert("RGB")
 
+            # На обучении класс создаётся автоматически:
+            # исходное изображение — 0, повёрнутое на 180° — 1.
+            # Поэтому для каждого обращения ориентация выбирается случайно.
             label = random.randint(0, 1)
 
             if label == 1:
@@ -106,7 +110,9 @@ class OrientationDataset(Dataset):
         scale = self.height / h
         new_w = round(w * scale)
 
-        # сжимаем слишком широкие изображения (!)
+        # Сохраняем пропорции, пока ширина не превышает max_width.
+        # Более длинные строки приходится горизонтально сжимать;
+        # поэтому при предсказании для них отдельно используются три фрагмента.
         new_w = min(new_w, self.max_width)
 
         image = image.resize(
@@ -117,7 +123,7 @@ class OrientationDataset(Dataset):
         # Нормализуем как в imagenet
         tensor = TF.to_tensor(image)
 
-        # пока что просто паддинг белым
+        # Дополняем изображение справа белым до фиксированной ширины.
         output = torch.ones(
             3,
             self.height,

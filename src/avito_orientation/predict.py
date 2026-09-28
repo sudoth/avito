@@ -23,6 +23,7 @@ CROP_AR = 12.0
 
 
 def three_crops(image):
+    """Возвращает левый, центральный и правый фрагменты длинной строки."""
     w, h = image.size
     crop_w = round(CROP_AR * h)
 
@@ -50,15 +51,21 @@ def parse_args():
         "--checkpoints",
         nargs="+",
         default=[
-            "models/convnextv2_tiny_e1_w768.pt",
-            "models/convnextv2_tiny_e2_w768.pt",
-            "models/convnextv2_tiny_e1_w768_seed1337.pt",
+            "models/convnext_dinov3_base_e1_w768_seed42.pt",
+            "models/convnextv2_base_e1_w768_seed42.pt",
         ],
     )
 
     parser.add_argument(
+        "--weights",
+        nargs="+",
+        type=float,
+        default=[0.65, 0.35],
+    )
+
+    parser.add_argument(
         "--output",
-        default="submissions/convnextv2_3model_tta_3crop.csv",
+        default="submissions/dino65_v2base35_tta_3crop.csv",
     )
 
     return parser.parse_args()
@@ -96,6 +103,9 @@ class TestDataset(Dataset):
             TEST_DIR / f"{image_id}.png"
         ).convert("RGB")
 
+        # Поворачиваем исходное изображение до масштабирования и дополнения.
+        # Если повернуть уже подготовленный тензор, белое поле окажется слева,
+        # хотя при обучении оно всегда находится справа.
         image_180 = image.rotate(180)
 
         x0 = self.preprocess(image)
@@ -111,8 +121,10 @@ def load_model(path):
         weights_only=True,
     )
 
+    model_name = checkpoint["model_name"]
+
     model = create_model(
-        "convnextv2_tiny"
+        model_name
     ).to(DEVICE)
 
     model.load_state_dict(
@@ -123,6 +135,7 @@ def load_model(path):
 
     print(
         f"Loaded {path} | "
+        f"model={model_name} | "
         f"epoch={checkpoint['epoch']}"
     )
 
@@ -163,6 +176,8 @@ def predict_model(model, loader):
             z180.float()
         )
 
+        # Для одного и того же текста вероятности должны удовлетворять
+        # p(x) ≈ 1 - p(R180(x)). Усреднение двух вариантов уменьшает ошибку.
         probs = (
             p0 + (1.0 - p180)
         ) / 2.0
@@ -231,6 +246,18 @@ def main():
 
     torch.set_float32_matmul_precision("high")
 
+    if len(args.checkpoints) != len(args.weights):
+        raise ValueError(
+            "Number of checkpoints must match number of weights"
+        )
+
+    weights = torch.tensor(
+        args.weights,
+        dtype=torch.float32,
+    )
+
+    weights = weights / weights.sum()
+
     sample = pd.read_csv(
         SAMPLE_PATH
     )
@@ -240,6 +267,15 @@ def main():
     print(f"Device: {DEVICE}")
     print(f"Test images: {len(image_ids)}")
     print(f"Models: {len(args.checkpoints)}")
+
+    print("Ensemble:")
+    for checkpoint, weight in zip(
+        args.checkpoints,
+        weights,
+    ):
+        print(
+            f"  {weight.item():.3f} | {checkpoint}"
+        )
 
     dataset = TestDataset(
         image_ids
@@ -256,13 +292,10 @@ def main():
         ) as image:
             w, h = image.size
 
+        # Очень длинные строки при обычной подготовке сильно сжимаются.
+        # Для AR >= 20 заменяем такое предсказание средним по трём фрагментам.
         if w / h >= WIDE_AR_THRESHOLD:
             wide_ids.append(image_id)
-
-    print(
-        f"Wide images: "
-        f"{len(wide_ids)} / {len(image_ids)}"
-    )
 
     loader = DataLoader(
         dataset,
@@ -286,7 +319,9 @@ def main():
             loader,
         )
 
-        all_probs.append(probs)
+        all_probs.append(
+            probs
+        )
 
         wide_probs = predict_wide_model(
             model,
@@ -303,21 +338,29 @@ def main():
         if DEVICE == "cuda":
             torch.cuda.empty_cache()
 
-    probs = torch.stack(
+    # Взвешенное объединение моделей для обычных изображений
+    stacked_probs = torch.stack(
         all_probs,
         dim=0,
-    ).mean(dim=0)
+    )
+
+    probs = (
+        stacked_probs
+        * weights[:, None]
+    ).sum(dim=0)
 
     id_to_idx = {
         image_id: idx
         for idx, image_id in enumerate(image_ids)
     }
 
+    # Взвешенное объединение моделей для длинных изображений
     for image_id in wide_ids:
         wide_p = sum(
-            model_probs[image_id]
-            for model_probs in all_wide_probs
-        ) / len(all_wide_probs)
+            weight.item() * model_probs[image_id]
+            for weight, model_probs
+            in zip(weights, all_wide_probs)
+        )
 
         idx = id_to_idx[image_id]
 
